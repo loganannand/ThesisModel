@@ -1,8 +1,16 @@
+"""
+PMC generates the trajectory
+BG-THA-M1 pathway decides whether or not to execute that trajectory
+Thus, there are two actions, "go" and "nogo", where the go action is the
+specified trajectory.
+BG-THA control similar to inhib control on SYDE556 LEC 11 @ 1:38:00
+"""
+
 import importlib
 import numpy as np
 
 import nengo
-import nengo_spa as spa
+from nengo.dists import Uniform
 
 from REACH import arm;
 
@@ -16,6 +24,9 @@ importlib.reload(CB)
 from REACH import S1;
 
 importlib.reload(S1)
+from REACH import PMC;
+
+importlib.reload(PMC)
 from REACH import framework;
 
 importlib.reload(framework)
@@ -36,6 +47,29 @@ def generate():
         targets.append(center)
         targets.append(ep)
     targets = np.array(targets)
+
+    # Individualize the 8 reaches
+    # Reach 1
+    reach1_start = targets[0]
+    reach1_stop = targets[1]
+    reach1_startx = targets[0][0]
+    reach1_stopx = targets[1][0]
+    reach1_starty = targets[0][1]
+    reach1_stopy = targets[1][1]
+    reach1_trajx = np.linspace(reach1_startx, reach1_stopx, 100)
+    reach1_trajy = np.linspace(reach1_starty, reach1_stopy, 100)
+    reach1_traj = np.vstack([reach1_trajx, reach1_trajy])
+    # Reach 2
+    print(targets)
+    reach2_start = targets[2]
+    reach2_stop = targets[3]
+    reach2_startx = reach2_start[0]
+    reach2_stopx = reach2_stop[0]
+    reach2_starty = reach2_start[1]
+    reach2_stopy = reach2_stop[1]
+    reach2_trajx = np.linspace(reach2_startx, reach2_stopx, 100)
+    reach2_trajy = np.linspace(reach2_starty, reach2_stopy, 100)
+    reach2_traj = np.vstack([reach2_trajx, reach2_trajy])
 
     arm_sim = arm.Arm2Link(dt=1e-3)
     # set the initial position of the arm
@@ -64,17 +98,15 @@ def generate():
         # subtract out current position to get desired task space direction
         nengo.Connection(net.S1.output[net.dim * 2:], net.error, transform=-1)
 
-        # create a PMC substitute -------------------------------------------------
-        net.PMC = nengo.Network('PMC')
-        with net.PMC:
-            def PMC_func(t):
-                """ every 1 seconds change target """
-                return targets[int(t) % len(targets)]
+        # generate circle trajectory
+        center = np.array([0.0, 1.25])
+        x = np.linspace(0.0, 2.0 * np.pi, 100)
+        circle_traj = np.vstack([np.cos(x) * .5, np.sin(x) * .5])
+        circle_traj += center[:, None]
 
-            net.PMC.output = nengo.Node(output=PMC_func, label='PMC')
-        # send target for calculating control signal
+        # create a PMC model ------------------------------------------------------
+        net.PMC = PMC.generate(targets, speed=1)
         nengo.Connection(net.PMC.output, net.error)
-        # send target (x,y) for plotting
         nengo.Connection(net.PMC.output, net.xy)
 
         # create  a CB model ------------------------------------------------------
@@ -82,8 +114,11 @@ def generate():
                              means=[0.6, 2.2, 0, 0],
                              scales=[.125, .25, 1, 1.5])
 
+        # create  a BG & THA model -------------------------------------------------
+        bg = nengo.networks.BasalGanglia(1)
+        tha = nengo.networks.Thalamus(1)
+
     model = framework.generate(net=net, probes_on=False)
     return model
-
 
 model = generate()
