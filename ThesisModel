@@ -1,0 +1,154 @@
+import nengo
+import numpy as np
+import importlib
+
+from REACH import arm; importlib.reload(arm)
+from REACH import M1; importlib.reload(M1)
+from REACH import PMC; importlib.reload(PMC)
+from REACH import CB; importlib.reload(CB)
+from REACH import S1; importlib.reload(S1)
+from REACH import framework; importlib.reload(framework)
+
+def generate():
+    kp = 200
+    kv = np.sqrt(kp) * 1.5
+    
+    center = np.array([0, 1.25])
+    arm_sim = arm.Arm2Link(dt=1e-3)
+    # Set inital position of the arm 
+    arm_sim.init_q = arm_sim.inv_kinematics(center)
+    arm_sim.reset()
+    
+    
+    
+    net = nengo.Network(seed=0)
+    with net:
+        net.dim = arm_sim.DOF
+        net.arm_node = arm_sim.create_nengo_node()
+        net.error = nengo.Ensemble(1000,2)
+        net.xy = nengo.Node(size_in=2)
+        
+        # Create an M1
+        net.M1 = M1.generate(arm_sim, kp=kp, operational_space=True, 
+                            inertia_compensation=True, means=[0.6, 2.2, 0, 0],
+                                            scales=[.5,.5,.25,.25])
+                                            
+        
+         # create an S1  
+        net.S1 = S1.generate(arm_sim,
+                             means=[.6, 2.2, -.5, 0, 0, 1.25],
+                             scales=[.5, .5, 1.7, 1.5, .75, .75])
+ 
+        # subtract current position to get task space direction
+        nengo.Connection(net.S1.output[net.dim*2:], net.error,
+                         transform=-1)
+ 
+        # create a trajectory for the hand to follow 
+        x = np.linspace(0.0, 2.0*np.pi, 100)
+        PMC_trajectory = np.vstack([np.cos(x) * .5,
+                                    np.sin(x) * .5])
+        PMC_trajectory += center[:, None]
+        
+        # Create the reversed trajectory 
+        x = PMC_trajectory[0]
+        y = PMC_trajectory[1]
+        x_rev = list(reversed(x))
+        x_rev = np.array(x_rev)
+        y_rev = list(reversed(y))
+        y_rev = np.array(y_rev)
+        reverse_traj = np.vstack([x_rev, y_rev])
+
+        
+        # Targets
+        def generate_reach_trajectory(start, distance, num_steps):
+            # Set the target position
+            target = start + np.array([distance, 0])
+            
+            # Generate a linear trajectory from the start to the target position
+            trajectory = np.zeros((num_steps, 2))
+            for i in range(num_steps):
+                t = i / (num_steps - 1)
+                trajectory[i, :] = (1 - t) * start + t * target
+            
+            return trajectory
+        
+        # Generate a reach of distance 0.5 from [0, 1.25] out to the right
+        reach_trajectory = generate_reach_trajectory(np.array([0, 1.25]), 
+                                                0.5, 100)
+
+
+    
+        # Create a PMC 
+        net.PMC = PMC.generate(reverse_traj, speed=1)
+        # send target for calculating control signal
+        nengo.Connection(net.PMC.output, net.error)
+        # send target (x,y) for plotting
+        nengo.Connection(net.PMC.output, net.xy)
+        
+        # Create a CB 
+        net.CB = CB.generate(arm_sim, kv=kv,
+                             means=[0.6, 2.2, -.5, 0],
+                             scales=[.5, .5, 1.6, 1.5])
+                             
+        # Create an AS
+        net.tha = nengo.networks.Thalamus(1)
+        net.bg = nengo.networks.BasalGanglia(1)
+        nengo.Connection(net.bg.output, net.tha.input)  # THIS CONNECTION SHOULD BE INHIBITORY
+
+        cntrl1 = nengo.Ensemble(300, dimensions=2, label='cntrl1')
+        
+        def above_threshold(x):
+            if x > 0.5:
+                return 1
+            else:
+                 return 0
+                 
+        def output_func(x):
+            if x < -0.9:
+                return 0
+            else:
+                return 1
+                
+        def thacont(x):
+            if x > 0.7:
+                return 0
+            else:
+                return 1
+                     
+        viscntrl = nengo.Node(0, label='viscntrl')
+        cntrl0 = nengo.Ensemble(300, dimensions=1, label='cntrl0')
+        nengo.Connection(net.PMC.ramp, cntrl0, function=output_func)
+        cntrl2 = nengo.Ensemble(300, 1, label='cntrl2')
+        nengo.Connection(cntrl2, net.bg.input)
+        cntrl3 = nengo.Ensemble(300, 1, label='cntrl3')
+        nengo.Connection(viscntrl, cntrl3)
+        
+        cntrl4 = nengo.Ensemble(500, 1, label='cntrl4')
+        cntrl5 = nengo.Ensemble(500, 1, label='cntrl5')
+        nengo.Connection(net.tha.output, cntrl4)
+        nengo.Connection(cntrl4, cntrl5, function=thacont)
+        
+        
+        # VISUAL INPUT CONTROL
+        def viscont(x):
+            if x[0] > 0:
+                return 0
+            else:
+                return x[1]
+                
+        nengo.Connection(cntrl3, cntrl1[0])
+        nengo.Connection(cntrl0, cntrl1[1])
+        nengo.Connection(cntrl1, cntrl2, function=viscont)
+        
+        # M1 inhibition
+        nengo.Connection(cntrl5, net.M1.M1.neurons, 
+                    transform=-10*np.ones((1000,1)))
+        
+
+ 
+ 
+ 
+    model = framework.generate(net=net, probes_on=True)
+    return model
+
+model = generate()
